@@ -1,0 +1,7 @@
+logs/*.log
+.install/last_update
+.install/packages
+ngrok.sh
+configs/keypass.kdbx
+webserver.todo
+.idea/*
