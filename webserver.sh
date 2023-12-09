@@ -80,7 +80,7 @@ BREW_PACKAGES_DIR="$brew_path/Cellar"
 
 # variables
 BREW_SERVICES="nginx redis mailhog mariadb"
-BREW_PACKAGES="bash-completion pkg-config libmcrypt composer imagemagick pv jpegoptim optipng phpunit nmap $BREW_SERVICES"
+BREW_PACKAGES="bash-completion pkg-config composer imagemagick pv jpegoptim optipng phpunit nmap $BREW_SERVICES"
 PHP_EXTENSIONS="redis apcu xdebug imagick mcrypt xmlrpc"
 PHP_VERSIONS=${PHP_VERSIONS:="7.4"}
 PHPVERSION=${PHPVERSION:=7.4}
@@ -235,6 +235,9 @@ install_packages() {
 	find $BREW_PACKAGES_DIR -type f -name "my.cnf" -exec rm -f {} \;
 
 	# enable bash_completion
+	if [ ! -f ~/.bash_profile ]; then
+		echo "" > ~/.bash_profile
+	fi
 	if ! grep -q "bash_completion.sh" ~/.bash_profile; then
 		echo '[[ -r "/usr/local/etc/profile.d/bash_completion.sh" ]] && . "/usr/local/etc/profile.d/bash_completion.sh"' >>~/.bash_profile
 	fi
@@ -266,7 +269,12 @@ install_packages() {
 
 				# install extension
 				if ! pecl list | grep "$extension" &>$LOG_OUTPUT; then
-					printf "\n" | pecl install "$extension" &>$LOG_OUTPUT
+					if [ "$extension" == "xmlrpc" ]; then
+						install_extension="channel://pecl.php.net/xmlrpc-1.0.0RC3"
+					else
+						install_extension=$extension
+					fi
+					printf "\n" | pecl install "$install_extension" &>$LOG_OUTPUT
 				fi
 				dne 2 # don't exit on failed installation
 			fi
