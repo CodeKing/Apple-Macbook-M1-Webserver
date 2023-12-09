@@ -1,14 +1,9 @@
 #!/bin/bash
 
-####################
-# @todo custom php.ini (like memory_limit -1)
-# @todo check for arm packages periodically (if exist, delete rosetta one)
-# @todo check and prefer arm package, if exist, check arm arch
-# @todo check for upgrades periodically
-####################
-
 # clear screen
 printf "\033c"
+
+HOMEBREW_INSTALL_FROM_API=0
 
 # get working dir (current path)
 WORKING_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -18,11 +13,8 @@ DEFAULT_IFS=$IFS
 export IFS=" "
 
 # default parameters
-ARM=${ARM:0}
-ARM_SUPPORT=0
 UPDATE_PACKAGES=${UPDATE_PACKAGES:0}
 PACKAGES_INSTALLED=""
-PACKAGES_INSTALLED_ARM=""
 RUN_UPDATE=0
 FORCE_UPGRADE=0
 LOG_OUTPUT="/dev/null"
@@ -44,10 +36,6 @@ while [[ $# -gt 0 ]]; do
 	key="$1"
 
 	case $key in
-	-arm)
-		ARM=1
-		shift # past value
-		;;
 	-u | --update)
 		UPDATE_PACKAGES=1
 		shift # past value
@@ -72,15 +60,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-# check arm support
-ARCH=$(file /bin/bash | grep arm64)
-[ ! -z "$ARCH" ] && ARM_SUPPORT=1 || ARM=0
-
-# paths arm64
-brew_path_arm="/opt/homebrew"
-brew_bin_dir_arm="$brew_path_arm/bin"
-brew_bin_arm="$brew_bin_dir_arm/brew"
-brew_arm="arch -arm64 $brew_bin_arm"
+# bind settings
+export HOMEBREW_INSTALL_FROM_API=FALSE
 
 # paths x86_64
 brew_path="/usr/local"
@@ -88,23 +69,22 @@ brew_bin_dir="$brew_path/bin"
 brew_bin="$brew_bin_dir/brew"
 brew="arch -x86_64 $brew_bin"
 
-# determine brew default path & binary, depending on arch type @todo outdated
-[ $ARM ] && [ $ARM_SUPPORT -eq 1 ] && brew_path="/opt/homebrew" || brew_path="/usr/local"
+# bin dirs
 bin_dir="$brew_path/bin"
 brew_bin="$bin_dir/brew"
-[ $ARM ] && [ $ARM_SUPPORT -eq 1 ] && brew="arch -arm64 $brew_bin" || brew="arch -x86_64 $brew_bin"
 
 # custom files
 NGINX_CONFIG="$brew_path/etc/nginx/nginx.conf"
-MYSQL_CONFIG="$brew_path_arm/etc/my.cnf"
+MYSQL_CONFIG="$brew_path/etc/my.cnf"
 BREW_PACKAGES_DIR="$brew_path/Cellar"
 
 # variables
-BREW_SERVICES="nginx redis mailhog mysql@5.6"
-BREW_PACKAGES="bash-completion composer imagemagick pv jpegoptim optipng $BREW_SERVICES"
-PHP_EXTENSIONS="redis apcu xdebug imagick"
-PHP_VERSIONS=${PHP_VERSIONS:="7.1 7.2 7.3 7.4 8.0"}
-PHPVERSION=${PHPVERSION:=7.2}
+BREW_SERVICES="nginx redis mailhog mariadb"
+BREW_PACKAGES="bash-completion pkg-config libmcrypt composer imagemagick pv jpegoptim optipng phpunit nmap $BREW_SERVICES"
+PHP_EXTENSIONS="redis apcu xdebug imagick mcrypt xmlrpc"
+PHP_VERSIONS=${PHP_VERSIONS:="7.4"}
+PHPVERSION=${PHPVERSION:=7.4}
+IS_KUTEGO=${KUTEGO:=0}
 
 # methods
 EO=0
@@ -139,10 +119,9 @@ is_installed() {
 
 	if [ $FORCE_UPGRADE -eq 1 ]; then
 		PACKAGES_INSTALLED=""
-		PACKAGES_INSTALLED_ARM=""
 	fi
 
-	[ "$IA" == "arm64" ] && [ $ARM_SUPPORT -eq 1 ] && IP=$PACKAGES_INSTALLED_ARM || IP=$PACKAGES_INSTALLED
+	IP=$PACKAGES_INSTALLED
 
 	if [[ "$IP" == *" $1"* ]]; then
 		return 0
@@ -177,9 +156,6 @@ update_packages() {
 		if [ -f "$brew_bin" ]; then
 			echo
 			$brew update &>$LOG_OUTPUT && $brew upgrade -q
-			if [ $ARM_SUPPORT -eq 1 ]; then
-				$brew_arm update &>$LOG_OUTPUT && $brew_arm upgrade -q
-			fi
 			echo "$CURRENT_TIMESTAMP" >"$WORKING_DIR/.install/last_update"
 		else
 			dne 1
@@ -188,21 +164,32 @@ update_packages() {
 }
 
 switch_php_version() {
-	# unlink all php versions
+	# unlink php 8 version
+	$brew services stop php &>$LOG_OUTPUT
+	$brew unlink php &>$LOG_OUTPUT
+
+	# unlink all php7.x versions
 	for v in $PHP_VERSIONS; do
-		if is_installed "php$version" "arm64"; then
-			$brew_arm unlink "php@$v" &>$LOG_OUTPUT
-		else
-			$brew unlink "php@$v" &>$LOG_OUTPUT
-		fi
+		$brew services stop "php@$v" &>$LOG_OUTPUT
+		$brew unlink "php@$v" &>$LOG_OUTPUT
 	done
 
 	# link requested php version
-	if is_installed "php$1" "arm64"; then
-		$brew_arm link --force "php@$1" &>$LOG_OUTPUT
-	else
-		$brew link --force "php@$1" &>$LOG_OUTPUT
-	fi
+	PHP_INI=/usr/local/etc/php/$1/php.ini
+	$brew link --force "php@$1" &>$LOG_OUTPUT
+
+	# override php.ini values
+	while read line; do
+			if [[ $line =~ "=" ]] && [[ $line != \;* ]]; then
+					variable=${line%%=*}
+					if grep "$variable" "$PHP_INI" > /dev/null; then
+							sed -i '' "s~^${variable}.*=.*$~${line}~" "$PHP_INI"
+							sed -i '' "s~^;${variable}.*=.*$~${line}~" "$PHP_INI"
+					else
+							echo "$line" >> "$PHP_INI"
+					fi
+			fi
+	done <"$WORKING_DIR/configs/php-ini-overrides.ini"
 }
 
 install_homebrew() {
@@ -218,39 +205,12 @@ install_homebrew() {
 		$brew tap kabel/php-ext
 		$brew update &>$LOG_OUTPUT && $brew upgrade &>$LOG_OUTPUT
 
-		if [ $ARM_SUPPORT -eq 1 ]; then
-			arch -arm64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" <$LOG_OUTPUT
-			$brew_arm analytics off &>$LOG_OUTPUT
-			$brew_arm tap shivammathur/php
-			$brew_arm tap kabel/php-ext
-			$brew_arm update &>$LOG_OUTPUT && $brew_arm upgrade &>$LOG_OUTPUT
-		fi
-
 		dne
 	fi
 }
 
 install_packages() {
-	# check to run arm check, depending on parameter or last update
-	RUN_ARM_CHECK=0
-
-	if [ $ARM_SUPPORT -eq 1 ]; then
-		if [[ $UPDATE_PACKAGES -eq 1 ]]; then
-			RUN_ARM_CHECK=1
-		elif [ -f "$WORKING_DIR/.install/last_update" ]; then
-			CURRENT_TIMESTAMP=$(date +%s)
-			LAST_UPDATE=$(cat "$WORKING_DIR/.install/last_update")
-			DIFF_SECONDS=$(($CURRENT_TIMESTAMP - $LAST_UPDATE))
-
-			# check, if last upgrade was within 5 seconds
-			if [ $DIFF_SECONDS -lt 5 ]; then
-				RUN_ARM_CHECK=1
-			fi
-		fi
-	fi
-
 	NEW_PACKAGES_INSTALLED=""
-	NEW_PACKAGES_INSTALLED_ARM=""
 
 	# append php packages
 	for version in $PHP_VERSIONS; do
@@ -259,42 +219,16 @@ install_packages() {
 
 	# default packages
 	for package in $BREW_PACKAGES; do
-		# check arm package installation
-		if [ $ARM_SUPPORT -eq 1 ] && is_installed "$package" "arm64" || $brew_arm ls --versions "$package" >$LOG_OUTPUT; then
-			arm_installed=1
-		else
-			arm_installed=0
-		fi
-
-		# install arm package
-		if [ $RUN_ARM_CHECK -eq 1 ] && [ $arm_installed -eq 0 ]; then
-			i
-			echo -n -e "install ${GREEN}arm64 ${CYAN}$package${NC}... "
-			$brew_arm install -s "$package" &>$LOG_OUTPUT
-			[ $? -eq 0 ] && arm_installed=1
-			dne 2 # don't exit on failed installation
-		fi
-
-		if [ $arm_installed -eq 0 ] && ! is_installed "$package" && ! $brew ls --versions "$package" >$LOG_OUTPUT; then
+		# install package
+		if ! is_installed "$package" && ! $brew ls --versions "$package" >$LOG_OUTPUT; then
 			i
 			echo -n -e "install ${GREEN}x86_64 ${CYAN}$package${NC}... "
-			$brew install -s "$package" &>$LOG_OUTPUT
+			$brew install "$package" &>$LOG_OUTPUT
 			dne
 		fi
 
-		# set NEW_PACKAGES_INSTALLED or NEW_PACKAGES_INSTALLED_ARM
-		if [ $arm_installed -eq 1 ]; then
-			NEW_PACKAGES_INSTALLED_ARM="$NEW_PACKAGES_INSTALLED_ARM $package"
-
-			# @todo remove x86_64 package, if install was successful
-			if is_installed "$package"; then
-				echo -n -e "uninstall ${GREEN}x86_64 ${CYAN}$package${NC}... "
-				$brew uninstall "$package" &>$LOG_OUTPUT
-				dne 2
-			fi
-		else
-			NEW_PACKAGES_INSTALLED="$NEW_PACKAGES_INSTALLED $package"
-		fi
+		# set NEW_PACKAGES_INSTALLED
+		NEW_PACKAGES_INSTALLED="$NEW_PACKAGES_INSTALLED $package"
 	done
 
 	# remove default mysql my.cnf
@@ -302,16 +236,11 @@ install_packages() {
 
 	# enable bash_completion
 	if ! grep -q "bash_completion.sh" ~/.bash_profile; then
-		if [ $ARM_SUPPORT -eq 1 ] && is_installed "bash-completion" "arm64"; then
-			echo '[[ -r "/opt/homebrew/etc/profile.d/bash_completion.sh" ]] && . "/opt/homebrew/etc/profile.d/bash_completion.sh"' >>~/.bash_profile
-		else
-			echo '[[ -r "/usr/local/etc/profile.d/bash_completion.sh" ]] && . "/usr/local/etc/profile.d/bash_completion.sh"' >>~/.bash_profile
-		fi
+		echo '[[ -r "/usr/local/etc/profile.d/bash_completion.sh" ]] && . "/usr/local/etc/profile.d/bash_completion.sh"' >>~/.bash_profile
 	fi
 
 	# install php extensions
 	RUN_UPDATE=1
-	# @todo check arm php version
 	current_php_version=""
 	for version in $PHP_VERSIONS; do
 		# loop extensions
@@ -389,11 +318,9 @@ install_packages() {
 	done
 
 	# save installed packages
-	if [ "$PACKAGES_INSTALLED" != "$NEW_PACKAGES_INSTALLED" ] || [ "$PACKAGES_INSTALLED_ARM" != "$NEW_PACKAGES_INSTALLED_ARM" ]; then
+	if [ "$PACKAGES_INSTALLED" != "$NEW_PACKAGES_INSTALLED" ]; then
 		PACKAGES_INSTALLED=$NEW_PACKAGES_INSTALLED
-		PACKAGES_INSTALLED_ARM=$NEW_PACKAGES_INSTALLED_ARM
 		echo "PACKAGES_INSTALLED=\"$NEW_PACKAGES_INSTALLED\"" >"$WORKING_DIR/.install/packages"
-		echo "PACKAGES_INSTALLED_ARM=\"$NEW_PACKAGES_INSTALLED_ARM\"" >>"$WORKING_DIR/.install/packages"
 	fi
 }
 
@@ -422,12 +349,12 @@ fi
 
 # stop all services
 echo -n "stop running services... "
-$brew services stop --all &>$LOG_OUTPUT
-$brew_arm services stop --all &>$LOG_OUTPUT
+#$brew services stop --all &>$LOG_OUTPUT
+#$brew_arm services stop --all &>$LOG_OUTPUT
 #if ps ax | grep -v grep | grep "redis-server" &>$LOG_OUTPUT; then
 #	killall redis-server &>$LOG_OUTPUT
 #fi
-dne
+#dne
 
 # link config files
 echo
@@ -461,24 +388,14 @@ dne
 echo
 SERVICES="$BREW_SERVICES php@$PHPVERSION"
 for service in $SERVICES; do
-	is_installed "$service" "arm64" && SA="arm64" || SA="x86_64"
+	SA="x86_64"
 	echo -n -e "start ${GREEN}${SA} ${CYAN}${service}${NC}... "
-
-	if is_installed "$service" "arm64"; then
-		$brew_arm services run "$service" &>$LOG_OUTPUT
-	else
-		$brew services run "$service" &>$LOG_OUTPUT
-	fi
-
+	$brew services restart "$service" &>$LOG_OUTPUT
 	dne
 done
 
 # flush redis
-if is_installed "redis" "arm64"; then
-	$brew_bin_dir_arm/redis-cli flushall &>$LOG_OUTPUT
-else
-	$bin_dir/redis-cli flushall &>$LOG_OUTPUT
-fi
+$bin_dir/redis-cli flushall &>$LOG_OUTPUT
 
 # bind console
 echo
@@ -490,11 +407,14 @@ if [ -f "$WWW_CONFIG_DIR/console.sh" ]; then
 		ln -s "$WORKING_DIR/configs/console.sh" /usr/local/bin/console
 	fi
 	chmod 777 /usr/local/bin/console
+	/usr/local/bin/console init
 
 	dne
 elif [ -f /usr/local/bin/console ]; then
 	unlink /usr/local/bin/console
 fi
+
+# custom views
 
 # reset defaults
 export IFS=$DEFAULT_IFS
